@@ -15,10 +15,6 @@ Language and Requirements
 - Packages: standard library only (socket, struct, sys, random)
 - No Makefile is required.
 
-Testing Environment
--------------------
-- Tested on: <TO BE FILLED — tested on CS undergrad machines>
-
 Files
 -----
   packet.py    — Shared packet serialization / deserialization module.
