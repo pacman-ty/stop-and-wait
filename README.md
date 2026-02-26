@@ -1,4 +1,4 @@
-CS 436 — Assignment 1: Stop-and-Wait File Transfer Protocol
+Stop-and-Wait File Transfer Protocol
 ============================================================
 
 Overview
