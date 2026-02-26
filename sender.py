@@ -1,133 +1,91 @@
 #!/usr/bin/env python3
 """
-sender.py - Stop-and-Wait RDT sender
-CS 436 Assignment 1
+Sender for the Stop-and-Wait RDT protocol.
 
-Usage: python3 sender.py <emulator_host> <emulator_port> <sender_port> <timeout_ms> <filename>
+Reads a text file and reliably transfers it to the receiver via the network
+emulator.  Implements timeout-based retransmission: one packet is sent at a
+time and the next packet is only sent after its ACK is received.
+
+Usage:
+    python3 sender.py <emu_host> <emu_port> <sender_port> <timeout_ms> <filename>
 """
 
-import socket
 import sys
-import struct
-import time
-
-# Packet types
-TYPE_ACK  = 0
-TYPE_DATA = 1
-TYPE_EOT  = 2
-
-PACKET_HEADER_SIZE = 12   # 3 x 4-byte integers
-MAX_DATA_SIZE      = 500
-
-
-def make_packet(ptype, seqnum, data=b''):
-    """
-    Build a packet: | type (4B) | seqnum (4B) | length (4B) | data |
-    """
-    length = len(data)
-    header = struct.pack('!III', ptype, seqnum, length)
-    return header + data
-
-
-def parse_packet(raw):
-    """Parse a raw packet and return (type, seqnum, length, data)."""
-    if len(raw) < PACKET_HEADER_SIZE:
-        return None
-    ptype, seqnum, length = struct.unpack('!III', raw[:PACKET_HEADER_SIZE])
-    data = raw[PACKET_HEADER_SIZE: PACKET_HEADER_SIZE + length]
-    return ptype, seqnum, length, data
+import socket
+from packet import (create_packet, parse_packet,
+                    TYPE_DATA, TYPE_ACK, TYPE_EOT,
+                    MAX_DATA_LENGTH, MAX_PACKET_SIZE)
 
 
 def main():
     if len(sys.argv) != 6:
-        print("Usage: python3 sender.py <emulator_host> <emulator_port> "
-              "<sender_port> <timeout_ms> <filename>")
+        print(f"Usage: {sys.argv[0]} <emu_host> <emu_port> <sender_port> "
+              f"<timeout_ms> <filename>")
         sys.exit(1)
 
-    emulator_host = sys.argv[1]
-    emulator_port = int(sys.argv[2])
-    sender_port   = int(sys.argv[3])
-    timeout_ms    = int(sys.argv[4])
-    filename      = sys.argv[5]
+    emu_host = sys.argv[1]
+    emu_port = int(sys.argv[2])
+    sender_port = int(sys.argv[3])
+    timeout_s = int(sys.argv[4]) / 1000.0
+    filename = sys.argv[5]
 
-    timeout_sec = timeout_ms / 1000.0
+    with open(filename, 'r') as f:
+        content = f.read()
 
-    # Read the file and split into chunks of MAX_DATA_SIZE bytes
-    try:
-        with open(filename, 'rb') as f:
-            file_bytes = f.read()
-    except FileNotFoundError:
-        print(f"Error: file '{filename}' not found.")
-        sys.exit(1)
+    # Split file content into chunks of up to 500 characters
+    chunks = [content[i:i + MAX_DATA_LENGTH]
+              for i in range(0, len(content), MAX_DATA_LENGTH)]
 
-    # Split into chunks
-    chunks = []
-    for i in range(0, max(1, len(file_bytes)), MAX_DATA_SIZE):
-        chunks.append(file_bytes[i:i + MAX_DATA_SIZE])
-    if len(file_bytes) == 0:
-        chunks = [b'']
-
-    # Open UDP socket
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind(('', sender_port))
 
     seqnum_log = []
-    ack_log    = []
+    ack_log = []
 
-    seqnum = 1   # First packet seqnum is 1
+    # Stop-and-Wait data transfer
+    for i, chunk in enumerate[str](chunks):
+        seqnum = i + 1
+        packet = create_packet(TYPE_DATA, seqnum, chunk)
 
-    for chunk in chunks:
-        packet = make_packet(TYPE_DATA, seqnum, chunk)
         while True:
-            # Send packet
-            sock.sendto(packet, (emulator_host, emulator_port))
+            sock.sendto(packet, (emu_host, emu_port))
             seqnum_log.append(seqnum)
 
-            # Wait for ACK with timeout
-            sock.settimeout(timeout_sec)
+            sock.settimeout(timeout_s)
             try:
-                raw, _ = sock.recvfrom(PACKET_HEADER_SIZE + MAX_DATA_SIZE)
-                parsed = parse_packet(raw)
-                if parsed is None:
-                    continue
-                ptype, aseqnum, _, _ = parsed
-                if ptype == TYPE_ACK and aseqnum == seqnum:
-                    ack_log.append(aseqnum)
-                    seqnum += 1
-                    break
-                # Wrong ACK or unexpected packet — retransmit
+                raw, _ = sock.recvfrom(MAX_PACKET_SIZE)
+                pkt_type, ack_seqnum, _, _ = parse_packet(raw)
+
+                if pkt_type == TYPE_ACK:
+                    ack_log.append(ack_seqnum)
+                    if ack_seqnum == seqnum:
+                        break  # correct ACK,move to next packet
+                # wrong or unexpected packet, fall through and retransmit
             except socket.timeout:
-                # Timer expired — retransmit (loop continues)
-                pass
+                pass  # timeout, retransmit
 
-    # Send EOT
-    eot_packet = make_packet(TYPE_EOT, 0, b'')
-    sock.sendto(eot_packet, (emulator_host, emulator_port))
+    # EOT
+    eot = create_packet(TYPE_EOT, 0)
+    sock.sendto(eot, (emu_host, emu_port))
 
-    # Wait for EOT from receiver (assumed never lost per spec)
-    sock.settimeout(10.0)
+    # Wait for the receiver's EOT (never lost, per spec)
+    sock.settimeout(None)
     while True:
-        try:
-            raw, _ = sock.recvfrom(PACKET_HEADER_SIZE + MAX_DATA_SIZE)
-            parsed = parse_packet(raw)
-            if parsed and parsed[0] == TYPE_EOT:
-                break
-        except socket.timeout:
-            # Resend EOT just in case
-            sock.sendto(eot_packet, (emulator_host, emulator_port))
+        raw, _ = sock.recvfrom(MAX_PACKET_SIZE)
+        pkt_type, _, _, _ = parse_packet(raw)
+        if pkt_type == TYPE_EOT:
+            break
 
-    sock.close()
-
-    # Write log files
+    # write logs
     with open('seqnum.log', 'w') as f:
-        for n in seqnum_log:
-            f.write(f"{n}\n")
+        for s in seqnum_log:
+            f.write(f"{s}\n")
 
     with open('ack.log', 'w') as f:
-        for n in ack_log:
-            f.write(f"{n}\n")
+        for a in ack_log:
+            f.write(f"{a}\n")
 
-    print("Transmission complete. Logs saved to seqnum.log and ack.log.")
+    sock.close()
 
 
 if __name__ == '__main__':
